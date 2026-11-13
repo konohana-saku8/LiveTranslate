@@ -62,3 +62,58 @@ def test_stderr_is_used_when_stdout_is_missing(monkeypatch, attr):
     handler = main._SafeConsoleHandler()
 
     assert handler.stream is err
+
+
+def test_tee_mirrors_to_both_sides():
+    terminal, captured = io.StringIO(), io.StringIO()
+    tee = main._TeeStream(terminal, captured)
+
+    tee.write("hello\n")
+    tee.flush()
+
+    assert terminal.getvalue() == "hello\n"
+    assert captured.getvalue() == "hello\n"
+
+
+def test_tee_survives_a_dead_terminal():
+    class Dead:
+        def write(self, _s):
+            raise ValueError("I/O operation on closed file")
+
+        def flush(self):
+            pass
+
+    captured = io.StringIO()
+    tee = main._TeeStream(Dead(), captured)
+
+    tee.write("still here\n")
+    tee.write("and again\n")
+
+    assert tee._primary is None
+    assert captured.getvalue() == "still here\nand again\n"
+
+
+def test_tee_without_any_terminal(capsys=None):
+    """Under pythonw both sides would be None; the file side must still work."""
+    captured = io.StringIO()
+    tee = main._TeeStream(None, captured)
+
+    tee.write("captured only\n")
+
+    assert captured.getvalue() == "captured only\n"
+
+
+def test_tee_flattens_progress_carriage_returns():
+    captured = io.StringIO()
+    tee = main._TeeStream(None, captured)
+
+    tee.write("Fetching 7 files:  14%")
+    tee.write("\rFetching 7 files:  29%\n")
+
+    assert "\r" not in captured.getvalue()
+    assert "14%" in captured.getvalue() and "29%" in captured.getvalue()
+
+
+def test_tee_reports_non_tty_so_progress_bars_stay_readable():
+    assert main._TeeStream(None, io.StringIO()).isatty() is False
+    assert main._TeeStream(io.StringIO(), None).isatty() is False

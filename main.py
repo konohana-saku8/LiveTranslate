@@ -113,13 +113,75 @@ class _SafeConsoleHandler(logging.StreamHandler):
             self.stream = None
 
 
+class _TeeStream:
+    """Write to the real console (when there is one) and to a capture file.
+
+    Without this, everything that does not go through `logging` — print(),
+    tqdm progress bars, huggingface warnings, subprocess-ish library chatter —
+    is silently dropped under pythonw.exe, which is exactly how most sessions
+    get started. `isatty()` always reports False so tqdm emits one line per
+    milestone instead of carriage-return animation, keeping the file readable.
+    """
+
+    def __init__(self, primary, capture):
+        self._primary = primary
+        self._capture = capture
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        if not isinstance(data, str):
+            data = str(data)
+        with self._lock:
+            if self._primary is not None:
+                try:
+                    self._primary.write(data)
+                    self._primary.flush()
+                except Exception:
+                    # Console went away; keep capturing to the file.
+                    self._primary = None
+            if self._capture is not None:
+                try:
+                    # A progress bar's \r becomes a newline so lines stay readable.
+                    self._capture.write(data.replace("\r", "\n") if "\r" in data else data)
+                    self._capture.flush()
+                except Exception:
+                    self._capture = None
+        return len(data)
+
+    def flush(self):
+        with self._lock:
+            for stream in (self._primary, self._capture):
+                if stream is not None:
+                    try:
+                        stream.flush()
+                    except Exception:
+                        pass
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    @property
+    def errors(self):
+        return "replace"
+
+
 def setup_logging():
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / f"livetrans_{datetime.now():%Y%m%d_%H%M%S}.log"
+    raw_out, raw_err = sys.stdout, sys.stderr
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
+    # Built before stdout is replaced, so it keeps writing to the real console
+    # and does not duplicate entries into the capture file.
     console_handler = _SafeConsoleHandler()
     console_handler.setLevel(logging.INFO)
 
@@ -128,6 +190,22 @@ def setup_logging():
     console_handler.setFormatter(fmt)
 
     logging.basicConfig(level=logging.DEBUG, handlers=[file_handler, console_handler])
+
+    # Everything that bypasses logging (print, tqdm, library warnings) still
+    # has to land somewhere, otherwise a pythonw session records nothing.
+    capture_file = None
+    try:
+        capture_file = open(
+            log_dir / f"{log_file.stem}.out.log",
+            "a",
+            encoding="utf-8",
+            errors="replace",
+            buffering=1,
+        )
+    except OSError:
+        pass  # read-only logs dir: keep running, just without the mirror
+    sys.stdout = _TeeStream(raw_out, capture_file)
+    sys.stderr = _TeeStream(raw_err, capture_file)
 
     for noisy in (
         "httpcore",
@@ -145,6 +223,7 @@ def setup_logging():
     logging.info(
         "Console output: "
         + ("on" if console_handler.stream is not None else "off (no console attached)")
+        + (f" | raw output mirrored to {capture_file.name}" if capture_file else "")
     )
 
     # FunASR/ModelScope spam the root logger; suppress after our own init log

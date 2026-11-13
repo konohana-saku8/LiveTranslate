@@ -81,6 +81,38 @@ from i18n import t, set_lang, LANGUAGES, COMMON_LANG_CODES
 _NO_PENDING = object()
 
 
+class _SafeConsoleHandler(logging.StreamHandler):
+    """Console handler that tolerates having no console.
+
+    pythonw.exe (LiveTranslate.bat) and windowed PyInstaller builds hand the
+    process a None sys.stdout *and* a None sys.stderr. StreamHandler(None) then
+    ends up with self.stream = None, so every single record raises inside
+    emit() and logging prints a full "--- Logging error ---" traceback — once
+    per log line, including the ASR hot path. Keep the handler, drop the noise.
+
+    emit() is overridden rather than just wrapped: StreamHandler.emit catches
+    every exception itself and re-raises it through handleError(), so an outer
+    try/except never sees the failure.
+    """
+
+    def __init__(self):
+        super().__init__(stream=None)
+        self.stream = sys.stdout if sys.stdout is not None else sys.stderr
+
+    def emit(self, record):
+        stream = self.stream
+        if stream is None:
+            return
+        try:
+            msg = self.format(record)
+            stream.write(msg + self.terminator)
+            stream.flush()
+        except Exception:
+            # Console closed or detached mid-run (PythonWindow gone, pipe
+            # broken). Stop writing there; the file handler still works.
+            self.stream = None
+
+
 def setup_logging():
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -88,7 +120,7 @@ def setup_logging():
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = _SafeConsoleHandler()
     console_handler.setLevel(logging.INFO)
 
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -110,6 +142,10 @@ def setup_logging():
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     logging.info(f"Log file: {log_file}")
+    logging.info(
+        "Console output: "
+        + ("on" if console_handler.stream is not None else "off (no console attached)")
+    )
 
     # FunASR/ModelScope spam the root logger; suppress after our own init log
     logging.getLogger().setLevel(logging.WARNING)

@@ -54,8 +54,19 @@ def test_update_stops_when_dependency_installation_fails():
 def test_install_entrypoints_pin_yasbd_and_drop_pysbd(path: str):
     installer = Path(path).read_text(encoding="utf-8").lower()
 
-    assert 'yasbd-lib>=0.15,<1.0' in installer
+    # No upper bound: pinning <1.0 made a newer release unresolvable, and a
+    # failed yasbd install used to ship a build that died on the first
+    # incremental-ASR split.
+    assert "yasbd-lib>=0.15" in installer
+    assert "yasbd-lib>=0.15," not in installer
     assert "install pysbd" not in installer
+
+
+def test_requirements_include_yasbd_for_incremental_asr():
+    """yasbd is imported on the ASR thread; it must not rely on a separate step."""
+    requirements = _requirement_lines()
+
+    assert "yasbd-lib>=0.15" in requirements
 
 
 def test_readmes_do_not_describe_the_removed_editdistance_workaround():

@@ -1111,8 +1111,25 @@ class LiveTranslateApp:
             f"GPU(main alloc/reserved)={snap['gpu_alloc']:.0f}/{snap['gpu_reserved']:.0f}MB "
             f"msgs={snap['msgs']} asr_calls={self._mem_asr_call_count} "
             f"asr_count={self._asr_count} tl_count={self._translate_count}"
+            f"{self._audio_health_suffix()}"
         )
         self._check_memory_threshold(snap["total_rss"])
+
+    def _audio_health_suffix(self):
+        """Loopback telemetry: tells a quiet room apart from a dead capture stream."""
+        cap = getattr(self, "_audio", None)
+        if cap is None:
+            return ""
+        try:
+            h = cap.health()
+        except Exception:
+            return ""
+        db = f"{20 * np.log10(h['rms']):.0f}" if h["rms"] > 1e-9 else "--"
+        flag = " STALLED" if h["stalled"] else ""
+        return (
+            f" audio_blocks={h['blocks']} audio_dbfs={db} "
+            f"audio_age={h['data_age']:.1f}s{flag}"
+        )
 
     def _compute_cost(self):
         if self._input_price > 0 or self._output_price > 0:
@@ -1417,21 +1434,49 @@ class LiveTranslateApp:
     # ── Incremental ASR ──
 
     _segmenter_cache = {}  # lang -> yasbd pysbd_adapter.Segmenter
+    _segmenter_unavailable = False  # yasbd missing/broken: degrade once, never raise
 
     @staticmethod
     def _get_segmenter(lang: str):
-        from yasbd import get_supported_langs, pysbd_adapter
-        if lang not in LiveTranslateApp._segmenter_cache:
-            seg_lang = lang if lang in get_supported_langs() else "en"
-            LiveTranslateApp._segmenter_cache[lang] = pysbd_adapter.Segmenter(
-                language=seg_lang, clean=False
+        """Return a cached yasbd segmenter, or None if yasbd is unusable.
+
+        yasbd sits on the incremental-ASR hot path inside the ASR thread. If the
+        import fails (the wheel was never installed after the PySBD→yasbd switch)
+        letting the ImportError escape kills _asr_loop and silences ASR for the
+        rest of the session with no visible error. Degrade instead.
+        """
+        if LiveTranslateApp._segmenter_unavailable:
+            return None
+        try:
+            from yasbd import get_supported_langs, pysbd_adapter
+        except Exception as e:
+            LiveTranslateApp._segmenter_unavailable = True
+            log.warning(
+                f"yasbd unavailable ({e}). Sentence splitting falls back to "
+                f"punctuation-only; install with: pip install yasbd-lib"
             )
+            return None
+        if lang not in LiveTranslateApp._segmenter_cache:
+            try:
+                seg_lang = lang if lang in get_supported_langs() else "en"
+                LiveTranslateApp._segmenter_cache[lang] = pysbd_adapter.Segmenter(
+                    language=seg_lang, clean=False
+                )
+            except Exception as e:
+                log.warning(f"Failed to build segmenter for '{lang}': {e}")
+                return None
         return LiveTranslateApp._segmenter_cache[lang]
 
     def _split_sentences(self, text: str, lang: str = "en") -> list[str]:
         """Split text into sentences using yasbd, with comma fallback for long text."""
+        parts = []
         seg = self._get_segmenter(lang)
-        parts = [p for p in seg.segment(text) if p.strip()]
+        if seg is not None:
+            try:
+                parts = [p for p in seg.segment(text) if p.strip()]
+            except Exception as e:
+                log.warning(f"Sentence segmentation failed for '{lang}': {e}")
+                parts = []
         if len(parts) > 1:
             return parts
 
@@ -1512,7 +1557,11 @@ class LiveTranslateApp:
             return False
 
         split_start = time.perf_counter()
-        sentences = self._split_sentences(full_text, result["language"])
+        try:
+            sentences = self._split_sentences(full_text, result["language"])
+        except Exception as e:
+            log.error(f"Interim sentence split failed: {e}", exc_info=True)
+            return False
         split_ms = (time.perf_counter() - split_start) * 1000
         if len(sentences) <= 1:
             return False
@@ -1777,24 +1826,32 @@ class LiveTranslateApp:
             if item is None:
                 break
 
-            seg_type, segment = item[0], item[1]
-            spoken_end = item[2] if len(item) > 2 else None
+            # Never let one bad segment take the whole thread down: a dead
+            # _asr_loop looks exactly like "audio stopped" from the outside.
+            try:
+                self._handle_asr_item(item)
+            except Exception:
+                log.error("ASR loop: item handling failed (thread kept alive)", exc_info=True)
 
-            if seg_type == "vad_flush":
-                if self._interim_active:
-                    self._process_interim_final(segment)
-                else:
-                    self._process_segment(segment, spoken_end)
-                self._interim_active = False
-                self._interim_pending = ""
-                self._last_interim_samples = 0
-                self._last_interim_check_time = 0.0
-                self._interim_committed_tail = ""
-            elif seg_type == "interim":
-                self._drain_interim_duplicates()
-                self._do_interim_asr()
-                with self._vad_lock:
-                    self._last_interim_samples = self._vad._speech_samples
+    def _handle_asr_item(self, item):
+        seg_type, segment = item[0], item[1]
+        spoken_end = item[2] if len(item) > 2 else None
+
+        if seg_type == "vad_flush":
+            if self._interim_active:
+                self._process_interim_final(segment)
+            else:
+                self._process_segment(segment, spoken_end)
+            self._interim_active = False
+            self._interim_pending = ""
+            self._last_interim_samples = 0
+            self._last_interim_check_time = 0.0
+            self._interim_committed_tail = ""
+        elif seg_type == "interim":
+            self._drain_interim_duplicates()
+            self._do_interim_asr()
+            with self._vad_lock:
+                self._last_interim_samples = self._vad._speech_samples
 
     def _drain_interim_duplicates(self):
         while True:

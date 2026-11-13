@@ -30,6 +30,10 @@ transformers>=4.40.0
 # VAD (bundles the Silero v5 model in the wheel — no GitHub/torch.hub download)
 silero-vad>=5.0
 
+# Sentence segmentation for incremental ASR. The PyPI distribution is yasbd-lib,
+# the import name is yasbd. Missing it silently used to kill the ASR thread.
+yasbd-lib>=0.15
+
 # Model hubs
 modelscope>=1.20.0
 huggingface_hub>=0.20.0

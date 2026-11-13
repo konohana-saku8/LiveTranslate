@@ -9,6 +9,15 @@ log = logging.getLogger("LiveTranslate.Audio")
 
 DEVICE_CHECK_INTERVAL = 2.0  # seconds
 
+# Loopback watchdog. WASAPI loopback can fail in a way that raises nothing:
+# read() keeps succeeding while handing back silence, or the stream stops
+# producing chunks entirely. Neither used to leave a single log line, which
+# made "no subtitles for a while" impossible to diagnose after the fact.
+STALL_WARN_SEC = 3.0        # no chunk for this long => stream is stalled
+STALL_MAX_RESTARTS = 3      # stop auto-restarting after this many attempts
+SILENCE_WARN_SEC = 120.0    # continuous all-zero audio => suspicious
+SILENCE_RMS_EPS = 1e-6      # below this counts as digital silence
+
 
 def list_output_devices():
     """Return list of WASAPI output device names."""
@@ -81,6 +90,14 @@ class AudioCapture:
         self._mic_native_channels = 1
         self._mic_restart_event = threading.Event()
         self._mic_buf = np.array([], dtype=np.float32)
+        # Loopback health telemetry (watchdog + periodic MEM[tick] logging)
+        self._blocks_read = 0
+        self._last_block_ts = 0.0
+        self._last_rms = 0.0
+        self._stall_since = None
+        self._stall_restarts = 0
+        self._silent_since = None
+        self._silence_warned = False
 
     def _get_wasapi_info(self):
         for i in range(self._pa.get_host_api_count()):
@@ -384,8 +401,12 @@ class AudioCapture:
                     log.warning(f"Mic read error: {e}")
 
             if loopback_audio is None:
+                if not self._loopback_disabled:
+                    self._check_loopback_stall()
                 time.sleep(0.005)
                 continue
+
+            self._note_loopback_block(loopback_audio)
 
             # Mix: take matching length from mic buffer
             audio = loopback_audio
@@ -407,6 +428,71 @@ class AudioCapture:
             except queue.Full:
                 self.audio_queue.get_nowait()
                 self.audio_queue.put_nowait((audio, mic_rms))
+
+    def _note_loopback_block(self, audio):
+        """Record loopback liveness; log the transitions back to healthy."""
+        now = time.monotonic()
+        self._blocks_read += 1
+        self._last_block_ts = now
+        self._last_rms = float(np.sqrt(np.mean(audio**2))) if len(audio) else 0.0
+
+        if self._stall_since is not None:
+            log.info(f"Loopback 数据恢复（此前停滞 {now - self._stall_since:.1f}s）")
+            self._stall_since = None
+            self._stall_restarts = 0
+
+        if self._last_rms >= SILENCE_RMS_EPS:
+            if self._silent_since is not None and now - self._silent_since >= SILENCE_WARN_SEC:
+                log.info(f"Loopback 恢复有声（此前静音 {now - self._silent_since:.0f}s）")
+            self._silent_since = None
+            self._silence_warned = False
+        elif self._silent_since is None:
+            self._silent_since = now
+        elif not self._silence_warned and now - self._silent_since >= SILENCE_WARN_SEC:
+            self._silence_warned = True
+            log.warning(
+                f"Loopback 已连续 {now - self._silent_since:.0f}s 全零：系统静音、"
+                f"设备被独占，或 WASAPI 流僵死（读数正常但不出声）"
+            )
+
+    def _check_loopback_stall(self):
+        """No chunk arrived at all — the stream itself may be dead. Try to revive it."""
+        now = time.monotonic()
+        if self._last_block_ts == 0.0:
+            return  # nothing received since start(); let it settle
+        stalled = now - self._last_block_ts
+        if stalled < STALL_WARN_SEC:
+            return
+
+        if self._stall_since is None:
+            self._stall_since = self._last_block_ts
+            log.warning(f"Loopback {stalled:.1f}s 读不到音频块（采集流疑似僵死）")
+
+        if self._stall_restarts >= STALL_MAX_RESTARTS:
+            return
+
+        self._stall_restarts += 1
+        try:
+            log.info(f"Loopback 停滞，自动重启采集流（第 {self._stall_restarts} 次）")
+            self._restart_stream()
+            self._last_block_ts = time.monotonic()
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+        except Exception as e:
+            log.error(f"Loopback 自动重启失败: {e}")
+
+    def health(self):
+        """Snapshot for periodic logging: chunk count, last chunk RMS, data age."""
+        now = time.monotonic()
+        return {
+            "blocks": self._blocks_read,
+            "rms": self._last_rms,
+            "data_age": 0.0 if self._last_block_ts == 0.0 else now - self._last_block_ts,
+            "stalled": self._stall_since is not None,
+        }
 
     def start(self):
         self._loopback_disabled = self._device_name == "__disabled__"

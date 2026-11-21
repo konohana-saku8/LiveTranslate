@@ -188,9 +188,9 @@ class ControlPanel(QWidget):
         remote.setdefault("host", "0.0.0.0")
         remote.setdefault("port", 8766)
         remote.setdefault("sync_overlay", True)
-        if not remote.get("token"):
-            remote["token"] = secrets.token_hex(8)
-            _save_settings(self._current_settings)
+        # No automatic token: an empty token means the server skips auth, so
+        # the phone works out of the box. Fill one in only if it is wanted.
+        remote.setdefault("token", "")
 
         layout = QVBoxLayout(self)
 

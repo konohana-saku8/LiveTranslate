@@ -640,6 +640,15 @@ class DragHandle(QWidget):
         title.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
         title.setStyleSheet("color: #aaa; background: transparent;")
         drag_layout.addWidget(title)
+
+        # Remote phone connection state, next to the title so it can be read
+        # at a glance instead of relying on the small status dot.
+        self._remote_label = QLabel(t("remote_status_stopped"))
+        self._remote_label.setFont(QFont("Consolas", 8))
+        self._remote_label.setStyleSheet("color: #888; background: transparent;")
+        self._remote_label.setToolTip(t("remote_status_stopped"))
+        drag_layout.addWidget(self._remote_label)
+
         drag_layout.addStretch()
         row1.addWidget(drag, 1)
 
@@ -667,12 +676,6 @@ class DragHandle(QWidget):
         row1.addWidget(self._start_stop_btn)
 
         # Remote server control, next to the local run/pause button.
-        self._remote_dot = QLabel("\u25cf")
-        self._remote_dot.setFont(QFont("Consolas", 8))
-        self._remote_dot.setStyleSheet("color: #888; background: transparent;")
-        self._remote_dot.setToolTip(t("remote_status_stopped"))
-        row1.addWidget(self._remote_dot)
-
         self._remote_btn = _btn(t("remote_start"))
         self._remote_btn.setToolTip(t("group_remote_server"))
         self._remote_btn.clicked.connect(self.remote_toggle_clicked.emit)
@@ -902,7 +905,7 @@ class DragHandle(QWidget):
             self._start_stop_btn.setStyleSheet(self._PAUSED_CSS)
 
     def set_remote_status(self, status: dict):
-        """Update the remote-service dot/button in the title bar."""
+        """Update the phone connection state shown in the title bar."""
         running = bool(status.get("running"))
         clients = int(status.get("clients", 0) or 0)
         if running:
@@ -912,16 +915,21 @@ class DragHandle(QWidget):
                 t("remote_status_connected") if clients
                 else t("remote_status_waiting")
             )
-            self._remote_dot.setStyleSheet(
+            self._remote_label.setText(
+                t("remote_status_connected") if clients
+                else t("remote_status_waiting")
+            )
+            self._remote_label.setStyleSheet(
                 "color: #3c9d50; background: transparent;" if clients
                 else "color: #e0a800; background: transparent;"
             )
-            self._remote_dot.setToolTip(detail)
+            self._remote_label.setToolTip(detail)
             self._remote_btn.setText(t("remote_stop"))
             self._remote_btn.setToolTip(detail)
         else:
-            self._remote_dot.setStyleSheet("color: #888; background: transparent;")
-            self._remote_dot.setToolTip(t("remote_status_stopped"))
+            self._remote_label.setText(t("remote_status_stopped"))
+            self._remote_label.setStyleSheet("color: #888; background: transparent;")
+            self._remote_label.setToolTip(t("remote_status_stopped"))
             self._remote_btn.setText(t("remote_start"))
             self._remote_btn.setToolTip(t("group_remote_server"))
 
@@ -1231,12 +1239,21 @@ class SubtitleOverlay(QWidget):
 
     @pyqtSlot(int, str, str, str, float)
     def _on_add_message(self, msg_id, timestamp, original, source_lang, asr_ms):
+        # A restarted remote server reuses its id space; drop the stale widget
+        # instead of leaving an orphan when the same id comes back.
+        previous = self._messages.pop(msg_id, None)
+        if previous is not None:
+            self._msg_layout.removeWidget(previous)
+            previous.deleteLater()
+
         msg = ChatMessage(msg_id, timestamp, original, source_lang, asr_ms)
         self._messages[msg_id] = msg
         self._msg_layout.addWidget(msg)
 
         if len(self._messages) > self._max_messages:
-            oldest_id = min(self._messages.keys())
+            # Evict by insertion order: remote ids are negative, so min(id)
+            # would delete the sentence that was just added.
+            oldest_id = next(iter(self._messages))
             old_msg = self._messages.pop(oldest_id)
             self._msg_layout.removeWidget(old_msg)
             old_msg.deleteLater()

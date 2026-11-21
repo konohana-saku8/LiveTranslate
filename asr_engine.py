@@ -30,15 +30,39 @@ class ASREngine:
         pad_seconds=None,
     ):
         self.language = language if language != "auto" else None
-        self._model = WhisperModel(
-            model_size,
+        if str(device).startswith("cuda"):
+            # ctranslate2 does not ship cublas64_12.dll on Windows. Importing
+            # torch first loads the matching CUDA 12 runtime from the nvidia-*
+            # wheel packages into the process, so ctranslate2 can find it.
+            try:
+                import torch  # noqa: F401
+            except Exception:
+                log.warning("Failed to preload torch CUDA runtime", exc_info=True)
+        model_kwargs = dict(
             device=device,
             device_index=device_index,
             compute_type=compute_type,
             download_root=download_root,
         )
+        # faster-whisper calls huggingface_hub.snapshot_download() even for an
+        # already cached model. With an offline/broken proxy that HEAD request
+        # fails before ctranslate2 can touch CUDA, so try the local cache first
+        # and only fall back to a real download when the model is absent.
+        try:
+            self._model = WhisperModel(model_size, local_files_only=True, **model_kwargs)
+            local_only = True
+        except Exception as local_exc:
+            log.warning(
+                f"Whisper local cache unavailable ({local_exc}); downloading",
+                exc_info=True,
+            )
+            self._model = WhisperModel(model_size, local_files_only=False, **model_kwargs)
+            local_only = False
         self._set_input_padding(pad_seconds, log_change=False)
-        log.info(f"Model loaded: {model_size} on {device} ({compute_type})")
+        log.info(
+            f"Model loaded: {model_size} on {device} ({compute_type}), "
+            f"local_only={local_only}"
+        )
         self._log_input_padding()
 
     @staticmethod

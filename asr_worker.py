@@ -83,6 +83,11 @@ def _load_engine(config: dict):
 
         worker_device = parsed_device if parsed_device == "cpu" else f"cuda:{device_index}"
         engine = QwenASREngine(device=worker_device, hub="hf")
+    elif engine_type == "reazonspeech":
+        from asr_reazonspeech import ReazonSpeechEngine
+
+        # CPU-only by design: ~36x realtime on one thread, no VRAM cost.
+        engine = ReazonSpeechEngine(precision=config.get("reazonspeech_precision", "int8"))
     else:
         from asr_engine import ASREngine
 

@@ -71,6 +71,7 @@ ASR_MODEL_IDS = {
     "funasr-mlt-nano": "FunAudioLLM/Fun-ASR-MLT-Nano-2512",
     "anime-whisper": "litagin/anime-whisper",
     "qwen-asr": "Qwen/Qwen3-ASR-1.7B-hf",
+    "reazonspeech": "reazon-research/reazonspeech-k2-v2",
 }
 
 FUNASR_MODEL_PROFILES = {
@@ -121,6 +122,7 @@ FUNASR_LEGACY_ENGINE_ALIASES = {
 ASR_MODEL_IDS_HF = {
     "sensevoice": "FunAudioLLM/SenseVoiceSmall",
     "qwen-asr": "Qwen/Qwen3-ASR-1.7B-hf",
+    "reazonspeech": "reazon-research/reazonspeech-k2-v2",
 }
 
 
@@ -144,6 +146,7 @@ ASR_DISPLAY_NAMES = {
     "whisper": "Whisper",
     "anime-whisper": "Anime-Whisper",
     "qwen-asr": "Qwen3-ASR",
+    "reazonspeech": "ReazonSpeech",
     "remote-whisper": "Remote-Whisper",
 }
 
@@ -159,6 +162,8 @@ _MODEL_SIZE_BYTES = {
     "whisper-large-v3": 3_100_000_000,
     "anime-whisper": 3_100_000_000,
     "qwen-asr": 4_100_000_000,
+    "reazonspeech-int8": 165_000_000,
+    "reazonspeech-fp32": 620_000_000,
 }
 
 _WHISPER_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
@@ -169,6 +174,7 @@ _CACHE_MODELS = [
     ("Fun-ASR-MLT-Nano", "funasr", "funasr-mlt-nano-2512"),
     ("Anime-Whisper", "anime-whisper"),
     ("Qwen3-ASR 1.7B", "qwen-asr"),
+    ("ReazonSpeech k2-v2", "reazonspeech"),
 ]
 
 
@@ -446,6 +452,19 @@ def is_asr_cached(engine_type, model_size="medium", hub="ms") -> bool:
             if has_weights and has_config:
                 return True
         return False
+    if engine_type == "reazonspeech":
+        precision = "int8" if str(model_size).lower() in ("int8", "quantized", "quant") else "fp32"
+        suffix = "" if precision == "fp32" else ".int8"
+        model_dir = get_local_model_path("reazonspeech", hub="hf")
+        if not model_dir:
+            return False
+        needed = [
+            "tokens.txt",
+            f"encoder-epoch-99-avg-1{suffix}.onnx",
+            f"decoder-epoch-99-avg-1{suffix}.onnx",
+            f"joiner-epoch-99-avg-1{suffix}.onnx",
+        ]
+        return all((Path(model_dir) / fn).is_file() for fn in needed)
     elif engine_type == "whisper":
         if model_size not in _WHISPER_SIZES:
             return resolve_custom_whisper_model(model_size) is not None
@@ -484,6 +503,11 @@ def get_missing_models(engine, model_size, hub) -> list:
         elif engine == "whisper":
             key = engine if engine != "whisper" else f"whisper-{model_size}"
             display = f"Whisper {model_size}"
+            estimated_bytes = _MODEL_SIZE_BYTES.get(key, 0)
+        elif engine == "reazonspeech":
+            precision = "int8" if str(model_size).lower() in ("int8", "quantized", "quant") else "fp32"
+            key = f"reazonspeech-{precision}"
+            display = f"ReazonSpeech ({precision})"
             estimated_bytes = _MODEL_SIZE_BYTES.get(key, 0)
         else:
             key = engine
@@ -656,7 +680,7 @@ def download_asr(engine, model_size="medium", hub="ms", proxy="system"):
             neutralize_funasr_requirements(funasr_dir)
             if funasr_dir and funasr_profile(model_key)["family"] == "funasr-nano":
                 ensure_qwen_weights(funasr_dir, hub=hub)
-        elif engine in ("anime-whisper", "qwen-asr"):
+        elif engine in ("anime-whisper", "qwen-asr", "reazonspeech"):
             # HF-only, ignore hub setting
             from huggingface_hub import snapshot_download
 

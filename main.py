@@ -48,6 +48,7 @@ from translator import Translator, RepetitionError
 # the writer itself is kept for when plain text files are wanted again.
 # from transcript_writer import TranscriptWriter
 from history_db import TranslationHistoryDB, debug_db_path
+from remote_server import RemoteServer
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QDialog, QMessageBox
 from PyQt6.QtGui import (
@@ -342,6 +343,7 @@ class LiveTranslateApp:
         self._overlay = None
         self._subwin = None
         self._panel = None
+        self._remote = None
         self._capture_thread = None
         self._asr_thread = None
         self._asr_queue = queue.Queue(maxsize=16)
@@ -408,6 +410,8 @@ class LiveTranslateApp:
         panel.settings_changed.connect(self._on_settings_changed)
         panel.model_changed.connect(self._on_model_changed)
         panel.models_list_changed.connect(self._on_models_list_changed)
+        panel.remote_start_requested.connect(self._start_remote_server)
+        panel.remote_stop_requested.connect(self._stop_remote_server)
 
     def _on_models_list_changed(self, models: list, active_idx: int):
         if self._overlay:
@@ -415,6 +419,8 @@ class LiveTranslateApp:
 
     def _on_settings_changed(self, settings):
         self._vad.update_settings(settings)
+        if self._remote is not None:
+            self._remote.update_vad_settings(settings)
         if "style" in settings and self._overlay:
             self._overlay.apply_style(settings["style"])
         if "asr_language" in settings:
@@ -468,6 +474,90 @@ class LiveTranslateApp:
         # txt transcripts are disabled in favour of the history database.
         # if "auto_save_transcript" in settings:
         #     self._transcript.set_enabled(settings["auto_save_transcript"])
+
+    def _remote_vad_settings(self) -> dict:
+        if not self._panel:
+            return {}
+        s = self._panel.get_settings()
+        keys = (
+            "vad_mode",
+            "vad_threshold",
+            "energy_threshold",
+            "min_speech_duration",
+            "max_speech_duration",
+            "silence_mode",
+            "silence_duration",
+        )
+        return {k: s[k] for k in keys if k in s}
+
+    def _on_remote_status(self, status: dict):
+        if self._panel is not None:
+            self._panel.update_remote_status(status)
+        if self._overlay is not None:
+            self._overlay.set_remote_status(status)
+
+    def _on_overlay_remote_toggle(self):
+        """Title-bar button: start, or stop the running remote server."""
+        if self._remote is not None and self._remote.running:
+            self._stop_remote_server()
+            return
+        settings = self._panel.remote_settings() if self._panel is not None else {}
+        self._start_remote_server(settings)
+
+    def _log_remote_history(self, text: str, translated: str, target_lang: str,
+                            failed: bool = False):
+        """Write a phone sentence pair using the same policy as local capture.
+
+        Called from the remote server thread; TranslationHistoryDB serialises
+        writes itself and tolerates an app that switched/debugged its database.
+        """
+        history = self._history
+        if history is not None:
+            history.log(text, translated, target_lang, None, None, failed=failed)
+
+    def _start_remote_server(self, settings: dict):
+        if self._remote is not None and self._remote.running:
+            self._on_remote_status(self._remote.status())
+            return
+        self._remote = RemoteServer(
+            asr_fn=lambda audio: self._run_asr(audio, "remote"),
+            translate_iter_fn=lambda text, lang: self._translator.translate_iter(
+                text, lang
+            ),
+            target_lang_fn=lambda: self._target_language,
+            vad_settings_fn=self._remote_vad_settings,
+            overlay=self._overlay,
+            sync_overlay=settings.get("sync_overlay", True),
+            on_status=self._on_remote_status,
+            history_log_fn=self._log_remote_history,
+        )
+        try:
+            self._remote.start(
+                host=settings.get("host", "0.0.0.0"),
+                port=settings.get("port", 8766),
+                token=settings.get("token", ""),
+                sync_overlay=settings.get("sync_overlay", True),
+            )
+        except Exception as e:
+            log.error(f"Remote server start failed: {e}")
+            self._remote = None
+            self._on_remote_status(
+                {"running": False, "host": settings.get("host"), "port": settings.get("port"), "clients": 0}
+            )
+            if self._panel is not None:
+                QMessageBox.warning(
+                    self._panel,
+                    "LiveTranslate",
+                    t("remote_start_failed").format(error=str(e)),
+                )
+            return
+        log.info(f"Remote server started on {settings.get('host')}:{settings.get('port')}")
+
+    def _stop_remote_server(self):
+        if self._remote is None:
+            return
+        self._remote.stop()
+        self._remote = None
 
     def _mark_asr_unavailable(self, reason: str, client=None):
         with self._asr_lock:
@@ -728,6 +818,8 @@ class LiveTranslateApp:
                 cache_model_key = model_path
         elif engine_type == "funasr":
             cache_model_key = funasr_model
+        elif engine_type == "reazonspeech":
+            cache_model_key = settings.get("reazonspeech_precision", "int8")
 
         remote_asr_url = settings.get(
             "remote_asr_url",
@@ -742,6 +834,9 @@ class LiveTranslateApp:
         elif engine_type == "remote-whisper":
             # URL is part of the identity so editing it triggers a reconnect.
             signature_model = remote_asr_url
+        elif engine_type == "reazonspeech":
+            # Precision switch must rebuild the worker with the other checkpoint.
+            signature_model = cache_model_key
         else:
             signature_model = engine_type
         signature = (engine_type, signature_model, device, hub, compute)
@@ -780,6 +875,8 @@ class LiveTranslateApp:
             display_name = f"Whisper {display_model}"
         elif engine_type == "funasr":
             display_name = funasr_display_name(funasr_model)
+        elif engine_type == "reazonspeech":
+            display_name = f"ReazonSpeech ({cache_model_key})"
 
         parent = (
             self._panel if self._panel and self._panel.isVisible() else self._overlay
@@ -788,6 +885,7 @@ class LiveTranslateApp:
         worker_config = {
             "engine_type": engine_type,
             "funasr_model": funasr_model,
+            "reazonspeech_precision": cache_model_key,
             "model_size": cache_model_key,
             "device": device,
             "compute_type": compute,
@@ -2634,6 +2732,7 @@ def main():
     quit_action = QAction(t("quit"))
 
     def on_quit():
+        live_trans._stop_remote_server()
         live_trans.stop()
         app.quit()
 
@@ -2661,6 +2760,7 @@ def main():
     overlay.stop_requested.connect(on_pause)
     overlay.hide_requested.connect(on_toggle_overlay)
     overlay.quit_requested.connect(on_quit)
+    overlay.remote_toggle_clicked.connect(live_trans._on_overlay_remote_toggle)
 
     tray.setContextMenu(menu)
     tray.show()

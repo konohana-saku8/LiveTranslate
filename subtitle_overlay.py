@@ -610,6 +610,7 @@ class DragHandle(QWidget):
     clear_clicked = pyqtSignal()
     hide_clicked = pyqtSignal()
     quit_clicked = pyqtSignal()
+    remote_toggle_clicked = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
     position_changed = pyqtSignal()
 
@@ -664,6 +665,19 @@ class DragHandle(QWidget):
         self._start_stop_btn = _btn(t("paused"))
         self._start_stop_btn.clicked.connect(self._on_start_stop)
         row1.addWidget(self._start_stop_btn)
+
+        # Remote server control, next to the local run/pause button.
+        self._remote_dot = QLabel("\u25cf")
+        self._remote_dot.setFont(QFont("Consolas", 8))
+        self._remote_dot.setStyleSheet("color: #888; background: transparent;")
+        self._remote_dot.setToolTip(t("remote_status_stopped"))
+        row1.addWidget(self._remote_dot)
+
+        self._remote_btn = _btn(t("remote_start"))
+        self._remote_btn.setToolTip(t("group_remote_server"))
+        self._remote_btn.clicked.connect(self.remote_toggle_clicked.emit)
+        row1.addWidget(self._remote_btn)
+        self.set_remote_status({})
 
         self._clear_btn = _btn(t("clear"))
         self._clear_btn.clicked.connect(self.clear_clicked.emit)
@@ -887,6 +901,30 @@ class DragHandle(QWidget):
             self._start_stop_btn.setText(t("paused"))
             self._start_stop_btn.setStyleSheet(self._PAUSED_CSS)
 
+    def set_remote_status(self, status: dict):
+        """Update the remote-service dot/button in the title bar."""
+        running = bool(status.get("running"))
+        clients = int(status.get("clients", 0) or 0)
+        if running:
+            detail = t("remote_status_running").format(
+                host=status.get("host", ""), port=status.get("port", "")
+            ) + " | " + (
+                t("remote_status_connected") if clients
+                else t("remote_status_waiting")
+            )
+            self._remote_dot.setStyleSheet(
+                "color: #3c9d50; background: transparent;" if clients
+                else "color: #e0a800; background: transparent;"
+            )
+            self._remote_dot.setToolTip(detail)
+            self._remote_btn.setText(t("remote_stop"))
+            self._remote_btn.setToolTip(detail)
+        else:
+            self._remote_dot.setStyleSheet("color: #888; background: transparent;")
+            self._remote_dot.setToolTip(t("remote_status_stopped"))
+            self._remote_btn.setText(t("remote_start"))
+            self._remote_btn.setToolTip(t("group_remote_server"))
+
     def _toggle_mode(self):
         new_mode = "compact" if self._mode == "full" else "full"
         self._apply_mode(new_mode)
@@ -935,6 +973,8 @@ class SubtitleOverlay(QWidget):
     quit_requested = pyqtSignal()
     subtitle_toggled = pyqtSignal()
     debug_toggled = pyqtSignal(bool)
+    remote_toggle_clicked = pyqtSignal()
+    remote_status_signal = pyqtSignal(dict)
     mode_changed = pyqtSignal(str)  # "full" or "compact"
     position_changed = pyqtSignal()
 
@@ -960,6 +1000,7 @@ class SubtitleOverlay(QWidget):
         self.update_monitor_signal.connect(self._on_update_monitor)
         self.update_stats_signal.connect(self._on_update_stats)
         self.update_asr_device_signal.connect(self._on_update_asr_device)
+        self.remote_status_signal.connect(self._on_remote_status)
 
     def _setup_ui(self):
         self.setWindowFlags(
@@ -1009,6 +1050,7 @@ class SubtitleOverlay(QWidget):
         self._handle.hide_clicked.connect(self.hide_requested.emit)
         self._handle.clear_clicked.connect(self._on_clear)
         self._handle.quit_clicked.connect(self.quit_requested.emit)
+        self._handle.remote_toggle_clicked.connect(self.remote_toggle_clicked.emit)
         self._handle.mode_changed.connect(self._on_mode_changed)
         self._handle.position_changed.connect(self.position_changed)
         container_layout.addWidget(self._handle)
@@ -1078,6 +1120,13 @@ class SubtitleOverlay(QWidget):
 
     def set_running(self, running: bool):
         self._handle.set_running(running)
+
+    def set_remote_status(self, status: dict):
+        """Thread-safe: the remote server reports from its own thread."""
+        self.remote_status_signal.emit(dict(status))
+
+    def _on_remote_status(self, status: dict):
+        self._handle.set_remote_status(status)
 
     def _set_topmost(self, enabled: bool):
         flags = self.windowFlags()

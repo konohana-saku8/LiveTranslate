@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import secrets
+import socket
 import threading
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDoubleSpinBox,
@@ -83,6 +86,16 @@ def _save_settings(settings: dict):
         log.warning(f"Failed to save settings: {e}")
 
 
+def _detect_lan_ip() -> str:
+    """Best-effort local network address shown in the remote tab hint."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
 class ControlPanel(QWidget):
     """Settings and monitoring panel."""
 
@@ -93,6 +106,10 @@ class ControlPanel(QWidget):
     _bench_result = pyqtSignal(str)
     _cache_result = pyqtSignal(list)
     reset_positions = pyqtSignal()
+    # Remote server (Android client) control
+    remote_start_requested = pyqtSignal(dict)
+    remote_stop_requested = pyqtSignal()
+    _remote_status_signal = pyqtSignal(dict)
 
     def __init__(self, config, saved_settings=None):
         super().__init__()
@@ -165,8 +182,18 @@ class ControlPanel(QWidget):
             "whisper_pad_seconds",
             config["asr"].get("whisper_pad_seconds", 0.5),
         )
+        self._current_settings.setdefault("reazonspeech_precision", "int8")
+
+        remote = self._current_settings.setdefault("remote_server", {})
+        remote.setdefault("host", "0.0.0.0")
+        remote.setdefault("port", 8766)
+        remote.setdefault("sync_overlay", True)
+        if not remote.get("token"):
+            remote["token"] = secrets.token_hex(8)
+            _save_settings(self._current_settings)
 
         layout = QVBoxLayout(self)
+
         tabs = QTabWidget()
 
         tabs.addTab(make_scroll_area(self._create_vad_tab()), t("tab_vad_asr"))
@@ -175,6 +202,7 @@ class ControlPanel(QWidget):
         )
         tabs.addTab(make_scroll_area(self._create_style_tab()), t("tab_style"))
         tabs.addTab(make_scroll_area(self._create_subtitle_tab()), t("tab_subtitle"))
+        tabs.addTab(make_scroll_area(self._create_remote_tab()), t("tab_remote"))
         tabs.addTab(self._create_benchmark_tab(), t("tab_benchmark"))
         self._cache_tab_index = tabs.addTab(
             make_scroll_area(self._create_cache_tab()), t("tab_cache")
@@ -221,6 +249,7 @@ class ControlPanel(QWidget):
                 "Anime-Whisper (ja, anime/galgame)",
                 "Remote Whisper (remote GPU server)",
                 f"[{t('asr_accurate')}] Qwen3-ASR 1.7B (multilingual)",
+                f"[{t('asr_fast')}] ReazonSpeech (ja, on-device)",
             ]
         )
         engine_map_idx = {
@@ -229,6 +258,7 @@ class ControlPanel(QWidget):
             "anime-whisper": 2,
             "remote-whisper": 3,
             "qwen-asr": 4,
+            "reazonspeech": 5,
         }
         engine_idx = engine_map_idx.get(s.get("asr_engine"), 0)
         self._asr_engine.setCurrentIndex(engine_idx)
@@ -382,6 +412,19 @@ class ControlPanel(QWidget):
         asr_layout.addWidget(QLabel(t("label_ui_lang")), 9, 0)
         asr_layout.addWidget(self._ui_lang_combo, 9, 1)
         self._ui_lang_combo.currentIndexChanged.connect(self._on_ui_lang_changed)
+
+        self._rs_precision_label = QLabel(t("label_rs_precision"))
+        self._rs_precision_combo = QComboBox()
+        self._rs_precision_combo.addItem(t("rs_precision_int8"), "int8")
+        self._rs_precision_combo.addItem(t("rs_precision_fp32"), "fp32")
+        saved_rs_precision = str(s.get("reazonspeech_precision", "int8")).lower()
+        rs_idx = self._rs_precision_combo.findData(
+            saved_rs_precision if saved_rs_precision in ("int8", "fp32") else "int8"
+        )
+        self._rs_precision_combo.setCurrentIndex(rs_idx if rs_idx >= 0 else 0)
+        self._rs_precision_combo.currentIndexChanged.connect(self._auto_save)
+        asr_layout.addWidget(self._rs_precision_label, 10, 0)
+        asr_layout.addWidget(self._rs_precision_combo, 10, 1)
 
         layout.addWidget(asr_group)
 
@@ -1042,9 +1085,86 @@ class ControlPanel(QWidget):
         layout.addWidget(browser)
         return widget
 
-    def _create_cache_tab(self):
-        from PyQt6.QtWidgets import QCheckBox
+    def _create_remote_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        s = self._current_settings.get("remote_server", {})
 
+        group = QGroupBox(t("group_remote_server"))
+        grid = QGridLayout(group)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel(t("remote_host")), 0, 0)
+        self._remote_host = QLineEdit(str(s.get("host", "0.0.0.0")))
+        self._remote_host.setToolTip(t("remote_host_hint"))
+        grid.addWidget(self._remote_host, 0, 1)
+
+        grid.addWidget(QLabel(t("remote_port")), 1, 0)
+        self._remote_port = QSpinBox()
+        self._remote_port.setRange(1024, 65535)
+        self._remote_port.setValue(int(s.get("port", 8766)))
+        grid.addWidget(self._remote_port, 1, 1)
+
+        grid.addWidget(QLabel(t("remote_token")), 2, 0)
+        token_row = QHBoxLayout()
+        self._remote_token = QLineEdit(str(s.get("token", "")))
+        self._remote_token.setToolTip(t("remote_token_hint"))
+        token_row.addWidget(self._remote_token, 1)
+        gen_btn = QPushButton(t("remote_token_generate"))
+        gen_btn.clicked.connect(self._on_remote_token_generate)
+        token_row.addWidget(gen_btn)
+        grid.addLayout(token_row, 2, 1)
+
+        self._remote_sync_cb = QCheckBox(t("remote_sync_overlay"))
+        self._remote_sync_cb.setChecked(bool(s.get("sync_overlay", True)))
+        self._remote_sync_cb.setToolTip(t("remote_sync_overlay_hint"))
+        grid.addWidget(self._remote_sync_cb, 3, 1)
+
+        layout.addWidget(group)
+
+        self._remote_lan_ip = _detect_lan_ip()
+        hint = QLabel(
+            t("remote_hint").format(ip=self._remote_lan_ip, port=self._remote_port.value())
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888;")
+        layout.addWidget(hint)
+        self._remote_hint = hint
+        self._remote_port.valueChanged.connect(self._on_remote_port_changed)
+
+        self._remote_status_signal.connect(self._on_remote_status)
+        return widget
+
+    def _on_remote_port_changed(self, port: int):
+        self._remote_hint.setText(
+            t("remote_hint").format(ip=self._remote_lan_ip, port=port)
+        )
+
+    def _on_remote_token_generate(self):
+        self._remote_token.setText(secrets.token_hex(8))
+        self._current_settings["remote_server"] = self._collect_remote_settings()
+        _save_settings(self._current_settings)
+
+    def _collect_remote_settings(self) -> dict:
+        return {
+            "host": self._remote_host.text().strip() or "0.0.0.0",
+            "port": self._remote_port.value(),
+            "token": self._remote_token.text().strip(),
+            "sync_overlay": self._remote_sync_cb.isChecked(),
+        }
+
+    def remote_settings(self) -> dict:
+        """Current remote server configuration (used by overlay start button)."""
+        return self._collect_remote_settings()
+
+    def update_remote_status(self, status: dict):
+        """Thread-safe: called from the server thread."""
+        self._remote_status_signal.emit(dict(status))
+
+    def _on_remote_status(self, status: dict):
+        self._remote_running = bool(status.get("running"))
+
+    def _create_cache_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         s = self._current_settings
@@ -1173,6 +1293,10 @@ class ControlPanel(QWidget):
             self._sensevoice_pad_seconds.setVisible(show_funasr_pad)
         if hasattr(self, "_remote_group"):
             self._remote_group.setVisible(index == 3)
+        if hasattr(self, "_rs_precision_combo"):
+            is_rs = index == 5
+            self._rs_precision_label.setVisible(is_rs)
+            self._rs_precision_combo.setVisible(is_rs)
         # Resize window to fit content after whisper group visibility change
         QTimer.singleShot(0, self._fit_height)
 
@@ -1506,11 +1630,16 @@ class ControlPanel(QWidget):
             2: "anime-whisper",
             3: "remote-whisper",
             4: "qwen-asr",
+            5: "reazonspeech",
         }
         self._current_settings["asr_engine"] = engine_map.get(
             self._asr_engine.currentIndex(), "whisper"
         )
         self._current_settings["funasr_model"] = self._selected_funasr_model()
+        if hasattr(self, "_rs_precision_combo"):
+            self._current_settings["reazonspeech_precision"] = (
+                self._rs_precision_combo.currentData() or "int8"
+            )
         if hasattr(self, "_remote_url_edit"):
             url = self._remote_url_edit.text().strip()
             if url:
@@ -1563,6 +1692,8 @@ class ControlPanel(QWidget):
             )
         if hasattr(self, "_style_preset"):
             self._current_settings["style"] = self._collect_style()
+        if hasattr(self, "_remote_host"):
+            self._current_settings["remote_server"] = self._collect_remote_settings()
         safe = {
             k: v
             for k, v in self._current_settings.items()

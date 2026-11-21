@@ -70,6 +70,7 @@ ASR_MODEL_IDS = {
     "funasr-nano": "FunAudioLLM/Fun-ASR-Nano-2512",
     "funasr-mlt-nano": "FunAudioLLM/Fun-ASR-MLT-Nano-2512",
     "anime-whisper": "litagin/anime-whisper",
+    "qwen-asr": "Qwen/Qwen3-ASR-1.7B-hf",
 }
 
 FUNASR_MODEL_PROFILES = {
@@ -119,6 +120,7 @@ FUNASR_LEGACY_ENGINE_ALIASES = {
 # SenseVoice lives under `iic/` on ModelScope but `FunAudioLLM/` on HuggingFace.
 ASR_MODEL_IDS_HF = {
     "sensevoice": "FunAudioLLM/SenseVoiceSmall",
+    "qwen-asr": "Qwen/Qwen3-ASR-1.7B-hf",
 }
 
 
@@ -141,6 +143,7 @@ ASR_DISPLAY_NAMES = {
     "funasr-mlt-nano": "Fun-ASR-MLT-Nano",
     "whisper": "Whisper",
     "anime-whisper": "Anime-Whisper",
+    "qwen-asr": "Qwen3-ASR",
     "remote-whisper": "Remote-Whisper",
 }
 
@@ -155,6 +158,7 @@ _MODEL_SIZE_BYTES = {
     "whisper-medium": 1_530_000_000,
     "whisper-large-v3": 3_100_000_000,
     "anime-whisper": 3_100_000_000,
+    "qwen-asr": 4_100_000_000,
 }
 
 _WHISPER_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
@@ -164,6 +168,7 @@ _CACHE_MODELS = [
     ("Fun-ASR-Nano", "funasr", "funasr-nano-2512"),
     ("Fun-ASR-MLT-Nano", "funasr", "funasr-mlt-nano-2512"),
     ("Anime-Whisper", "anime-whisper"),
+    ("Qwen3-ASR 1.7B", "qwen-asr"),
 ]
 
 
@@ -420,7 +425,7 @@ def is_asr_cached(engine_type, model_size="medium", hub="ms") -> bool:
             if not model_dir or not qwen_weights_present(model_dir):
                 return False
         return True
-    if engine_type == "anime-whisper":
+    if engine_type in ("anime-whisper", "qwen-asr"):
         # HF-only (not published to ModelScope). Check that snapshots dir actually
         # contains weight files; an .incomplete blob means a prior run aborted mid-download.
         model_id = ASR_MODEL_IDS[engine_type]
@@ -651,7 +656,7 @@ def download_asr(engine, model_size="medium", hub="ms", proxy="system"):
             neutralize_funasr_requirements(funasr_dir)
             if funasr_dir and funasr_profile(model_key)["family"] == "funasr-nano":
                 ensure_qwen_weights(funasr_dir, hub=hub)
-        elif engine == "anime-whisper":
+        elif engine in ("anime-whisper", "qwen-asr"):
             # HF-only, ignore hub setting
             from huggingface_hub import snapshot_download
 

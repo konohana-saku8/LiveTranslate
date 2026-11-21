@@ -9,7 +9,7 @@ audio:
   chunk_duration: 0.032
 
 asr:
-  # ASR engine: whisper, funasr, anime-whisper
+  # ASR engine: whisper, funasr, anime-whisper, qwen-asr
   asr_engine: "funasr"
   # Model size: tiny, base, small, medium, large-v3
   model_size: "medium"
@@ -73,6 +73,11 @@ history:
   # programs' rows read the same; see LANGUAGE_TAGS in history_db.py.
   # Leave empty to turn the database off.
   db_path: "D:/HibaneHinome/live-archive/.data/translation_history.db"
+  # Debug mode (toggle on the overlay panel / tray menu) writes ONLY here, never
+  # to db_path. Leave empty to derive it from db_path by inserting ".debug"
+  # before the extension: .../.data/translation_history.debug.db
+  # The runtime toggle state is saved in user_settings.json as "debug_mode".
+  debug_db_path: ""
 
 subtitle:
   # Font family

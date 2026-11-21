@@ -51,6 +51,7 @@ from model_manager import (
     resolve_custom_whisper_model,
 )
 from i18n import t, LANGUAGES
+from history_db import debug_db_path
 from subtitle_settings import SubtitleSettingsWidget
 
 log = logging.getLogger("LiveTranslate.Panel")
@@ -219,6 +220,7 @@ class ControlPanel(QWidget):
                 f"[{t('asr_fast')}] FunASR",
                 "Anime-Whisper (ja, anime/galgame)",
                 "Remote Whisper (remote GPU server)",
+                f"[{t('asr_accurate')}] Qwen3-ASR 1.7B (multilingual)",
             ]
         )
         engine_map_idx = {
@@ -226,6 +228,7 @@ class ControlPanel(QWidget):
             "funasr": 1,
             "anime-whisper": 2,
             "remote-whisper": 3,
+            "qwen-asr": 4,
         }
         engine_idx = engine_map_idx.get(s.get("asr_engine"), 0)
         self._asr_engine.setCurrentIndex(engine_idx)
@@ -641,6 +644,20 @@ class ControlPanel(QWidget):
         browse_btn = QPushButton(t("btn_browse"))
         browse_btn.clicked.connect(self._pick_history_db)
         history_layout.addWidget(browse_btn, 0, 2)
+
+        # Debug mode writes here instead of the shared archive. Empty = derive
+        # a sibling `.debug.db` from the production path above.
+        self._debug_db_edit = QLineEdit(str(s.get("debug_db_path", "") or ""))
+        self._debug_db_edit.setPlaceholderText(
+            debug_db_path(initial_db) or t("label_debug_db_hint")
+        )
+        self._debug_db_edit.setToolTip(t("label_debug_db_hint"))
+        self._debug_db_edit.editingFinished.connect(self._auto_save)
+        history_layout.addWidget(QLabel(t("label_debug_db_path")), 1, 0)
+        history_layout.addWidget(self._debug_db_edit, 1, 1)
+        debug_browse_btn = QPushButton(t("btn_browse"))
+        debug_browse_btn.clicked.connect(self._pick_debug_db)
+        history_layout.addWidget(debug_browse_btn, 1, 2)
         layout.addWidget(history_group)
 
         layout.addStretch()
@@ -1427,7 +1444,13 @@ class ControlPanel(QWidget):
         )
 
     def _pick_history_db(self):
-        current = self._history_db_edit.text().strip()
+        self._pick_db_file(self._history_db_edit)
+
+    def _pick_debug_db(self):
+        self._pick_db_file(self._debug_db_edit)
+
+    def _pick_db_file(self, edit):
+        current = edit.text().strip()
         start_dir = str(Path(current).parent) if current else str(Path(__file__).parent)
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -1436,7 +1459,7 @@ class ControlPanel(QWidget):
             "SQLite (*.db *.sqlite *.db3);;All Files (*)",
         )
         if path:
-            self._history_db_edit.setText(path)
+            edit.setText(path)
             self._auto_save()
 
     def _auto_save(self):
@@ -1482,6 +1505,7 @@ class ControlPanel(QWidget):
             1: "funasr",
             2: "anime-whisper",
             3: "remote-whisper",
+            4: "qwen-asr",
         }
         self._current_settings["asr_engine"] = engine_map.get(
             self._asr_engine.currentIndex(), "whisper"
@@ -1526,6 +1550,10 @@ class ControlPanel(QWidget):
         if hasattr(self, "_history_db_edit"):
             self._current_settings["history_db_path"] = (
                 self._history_db_edit.text().strip()
+            )
+        if hasattr(self, "_debug_db_edit"):
+            self._current_settings["debug_db_path"] = (
+                self._debug_db_edit.text().strip()
             )
         if hasattr(self, "_incremental_asr_cb"):
             self._on_timing_changed()

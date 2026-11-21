@@ -102,7 +102,14 @@ PROMPT_PRESETS = {
 def make_openai_client(
     api_base: str, api_key: str, proxy: str = "none", timeout=None
 ) -> OpenAI:
-    kwargs = {"base_url": api_base, "api_key": api_key}
+    # 本地端点（LM Studio / llama.cpp / Ollama）不校验 key，但 openai>=1.40 的
+    # 客户端在 key 为空时直接抛 Missing credentials，构造就挂了（11-21 00:18 切到
+    # Hy-MT2 时那条 CRITICAL）。给个占位符，让空 key 只影响远端鉴权、不影响本地端点。
+    kwargs = {"base_url": api_base, "api_key": api_key or "local"}
+    # SDK 默认 max_retries=2（总共 3 次），碰上服务端抖动会把单句拖成 3 倍超时、
+    # 把 8 个翻译线程全占满，后面排队的句子跟着一起超时（11-21 00:14 的连锁报错）。
+    # 只留一次重试，超时的代价封在 2 倍以内。
+    kwargs["max_retries"] = 1
     if timeout is not None:
         kwargs["timeout"] = httpx.Timeout(timeout, connect=5.0)
     if proxy == "system":

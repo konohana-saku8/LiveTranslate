@@ -47,7 +47,7 @@ from translator import Translator, RepetitionError
 # txt transcripts are replaced by the shared history database (see history_db.py);
 # the writer itself is kept for when plain text files are wanted again.
 # from transcript_writer import TranscriptWriter
-from history_db import TranslationHistoryDB
+from history_db import TranslationHistoryDB, debug_db_path
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QDialog, QMessageBox
 from PyQt6.QtGui import (
@@ -349,14 +349,14 @@ class LiveTranslateApp:
 
         # Every finished translation is appended to the SQLite history shared with
         # the C# LiveCaptions-Translator (same file, same table). An empty path in
-        # config.yaml disables the database.
+        # config.yaml disables the database. Debug mode routes all writes to a
+        # separate file so test runs never touch the shared archive.
         history_cfg = config.get("history") or {}
-        history_path = str(history_cfg.get("db_path") or "").strip()
-        self._history = (
-            TranslationHistoryDB(history_path, api_name=f"LiveTranslate:{config['translation']['model']}")
-            if history_path
-            else None
-        )
+        self._history_db_path = str(history_cfg.get("db_path") or "").strip()
+        self._debug_db_path = str(history_cfg.get("debug_db_path") or "").strip()
+        self._debug_mode = bool(history_cfg.get("debug", False))
+        self._history = None
+        self._open_history()
         # self._transcript = TranscriptWriter(Path(__file__).parent / "transcripts")
 
         # Memory diagnostic state
@@ -398,6 +398,7 @@ class LiveTranslateApp:
 
     def set_overlay(self, overlay: SubtitleOverlay):
         self._overlay = overlay
+        self._sync_debug_ui()
 
     def set_subtitle_window(self, subwin: SubtitleWindow):
         self._subwin = subwin
@@ -450,6 +451,10 @@ class LiveTranslateApp:
             self._audio.set_mic_device(settings["mic_device"])
         if "history_db_path" in settings:
             self._set_history_db(settings["history_db_path"])
+        if "debug_db_path" in settings:
+            self._set_debug_db_path(settings["debug_db_path"])
+        if "debug_mode" in settings:
+            self._set_debug_mode(settings["debug_mode"])
         if "incremental_asr" in settings:
             self._incremental_enabled = settings["incremental_asr"]
         if "interim_interval" in settings:
@@ -506,29 +511,74 @@ class LiveTranslateApp:
             log.info(f"Shutting down ASR worker: pid={client.pid}")
             client.shutdown()
 
-    def _set_history_db(self, path: str):
-        """Switch the history database without restarting; empty path disables it."""
-        path = str(path or "").strip()
-        # Settings store the path exactly as typed, so the same file can come
-        # back as "D:/x/y.db" or "D:\x\y.db". Compare normalised forms, or every
-        # unrelated settings save would close and reopen the connection.
-        if (
-            self._history is not None
-            and path
-            and Path(path).expanduser().resolve() == Path(self._history.path).resolve()
-        ):
-            return
+    def _history_target_path(self) -> str:
+        """Database actually written to, depending on the Debug toggle."""
+        if self._debug_mode:
+            return debug_db_path(self._history_db_path, self._debug_db_path)
+        return self._history_db_path
+
+    def debug_target_path(self) -> str:
+        """Debug database path shown in the overlay tooltip."""
+        return debug_db_path(self._history_db_path, self._debug_db_path)
+
+    def _sync_debug_ui(self):
+        if self._overlay is not None:
+            self._overlay.set_debug_db_path(self.debug_target_path())
+
+    def _open_history(self):
+        """Open the effective DB; retire the old writer so in-flight writes cannot
+        reconnect to the previously selected file (the production archive)."""
+        path = self._history_target_path()
+        # Settings store paths exactly as typed ("D:/x.db" vs "D:\\x.db"), so
+        # compare normalised forms to avoid reopening on every unrelated save.
+        if self._history is not None and path:
+            try:
+                same = (
+                    Path(path).expanduser().resolve()
+                    == Path(self._history.path).resolve()
+                )
+            except OSError:
+                same = False
+            if same:
+                self._sync_debug_ui()
+                return
         if self._history is not None:
-            self._history.close()
+            self._history.retire()
             self._history = None
         if not path:
-            log.info("History database disabled")
+            log.info(f"History database disabled (debug={self._debug_mode})")
+            self._sync_debug_ui()
             return
         self._history = TranslationHistoryDB(
             path, api_name=f"LiveTranslate:{self._config['translation']['model']}"
         )
+        self._sync_debug_ui()
+        log.info("History database -> %s%s", path, " [DEBUG]" if self._debug_mode else "")
+
+    def _set_history_db(self, path: str):
+        """Switch the production history DB; Debug mode keeps its own target."""
+        path = str(path or "").strip()
+        if path == self._history_db_path:
+            return
+        self._history_db_path = path
         self._config.setdefault("history", {})["db_path"] = path
-        log.info(f"History database -> {path}")
+        self._open_history()
+
+    def _set_debug_db_path(self, path: str):
+        path = str(path or "").strip()
+        if path == self._debug_db_path:
+            return
+        self._debug_db_path = path
+        self._config.setdefault("history", {})["debug_db_path"] = path
+        self._open_history()
+
+    def _set_debug_mode(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self._debug_mode:
+            return
+        self._debug_mode = enabled
+        self._config.setdefault("history", {})["debug"] = enabled
+        self._open_history()
 
     def _set_asr_language(self, language: str):
         with self._asr_pending_lock:
@@ -1991,8 +2041,16 @@ def main():
 
     # The control panel can override the history database location; an empty
     # string there means "no history", which must not fall back to config.yaml.
-    if saved is not None and "history_db_path" in saved:
-        config.setdefault("history", {})["db_path"] = saved["history_db_path"]
+    # Debug state is restored before the app is built so no first translation
+    # can accidentally land in the production archive.
+    if saved is not None:
+        history_cfg = config.setdefault("history", {})
+        if "history_db_path" in saved:
+            history_cfg["db_path"] = saved["history_db_path"]
+        if "debug_db_path" in saved:
+            history_cfg["debug_db_path"] = saved["debug_db_path"]
+        if "debug_mode" in saved:
+            history_cfg["debug"] = bool(saved["debug_mode"])
 
     # Log actual effective config
     _asr_eng = (saved or {}).get("asr_engine", config["asr"].get("asr_engine", "funasr"))
@@ -2094,6 +2152,9 @@ def main():
     panel = ControlPanel(config, saved_settings=saved)
 
     overlay = SubtitleOverlay(config["subtitle"])
+    # Restore the toggle visually; the app already reads debug_mode from saved
+    # settings, so no signal is emitted here (no pipeline exists yet).
+    overlay.set_debug_checked(bool((saved or {}).get("debug_mode", False)), emit=False)
     if saved:
         ox = saved.get("overlay_x")
         oy = saved.get("overlay_y")
@@ -2346,8 +2407,34 @@ def main():
     menu.addAction(log_action)
     menu.addSeparator()
 
-    # --- Overlay submenu (click-through, topmost, auto-scroll, taskbar) ---
+    # --- Overlay submenu (click-through, topmost, auto-scroll, taskbar, debug) ---
     overlay_menu = QMenu(t("tray_menu_overlay"))
+
+    # Single canonical handler for both the panel checkbox and the tray item.
+    # The reentrancy guard keeps the two mirrors from toggling each other.
+    _debug_updating = [False]
+
+    def _on_debug_toggled(enabled):
+        if _debug_updating[0]:
+            return
+        _debug_updating[0] = True
+        try:
+            live_trans._set_debug_mode(enabled)
+            settings = panel.get_settings()
+            settings["debug_mode"] = enabled
+            panel._current_settings["debug_mode"] = enabled
+            _save_settings(settings)
+            overlay.set_debug_checked(enabled, emit=False)
+            debug_action.blockSignals(True)
+            debug_action.setChecked(enabled)
+            debug_action.blockSignals(False)
+        finally:
+            _debug_updating[0] = False
+
+    debug_action = QAction(t("debug"), checkable=True)
+    debug_action.setChecked(bool(panel.get_settings().get("debug_mode", False)))
+    debug_action.toggled.connect(_on_debug_toggled)
+    overlay.debug_toggled.connect(_on_debug_toggled)
 
     ct_action = QAction(t("click_through"), checkable=True)
     topmost_action = QAction(t("top_most"), checkable=True)
@@ -2380,6 +2467,8 @@ def main():
     overlay_menu.addAction(topmost_action)
     overlay_menu.addAction(autoscroll_action)
     overlay_menu.addAction(taskbar_action)
+    overlay_menu.addSeparator()
+    overlay_menu.addAction(debug_action)
     menu.addMenu(overlay_menu)
 
     # --- Model submenu ---

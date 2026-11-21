@@ -96,6 +96,38 @@ def to_history_language(code: str) -> str:
     return LANGUAGE_TAGS.get(code.lower(), code)
 
 
+def debug_db_path(production_path: str, override: str = "") -> str:
+    """Path used while Debug is on. Never resolves to the production database.
+
+    By default the debug file sits next to the real one with `.debug` inserted
+    before the extension (`translation_history.db` -> `translation_history.debug.db`),
+    so a test run cannot add rows to the archive the export tools read. An explicit
+    override is honoured unless it points at the production file itself.
+    """
+    production = str(production_path or "").strip()
+    custom = str(override or "").strip()
+    if custom:
+        try:
+            same_as_production = bool(production) and (
+                Path(custom).expanduser().resolve()
+                == Path(production).expanduser().resolve()
+            )
+        except OSError:  # a bad path should not stop the writer from starting
+            same_as_production = False
+        if not same_as_production:
+            return custom
+    if not production:
+        # No production DB configured means history is off; Debug must not
+        # silently create a database somewhere else.
+        return ""
+    p = Path(production).expanduser()
+    stem = p.stem if p.suffix else p.name
+    if stem.endswith(".debug") or p.suffix == ".debug":
+        return str(p)
+    suffix = p.suffix or ".db"
+    return str(p.with_name(f"{stem}.debug{suffix}"))
+
+
 class TranslationHistoryDB:
     """Appends one row per finished sentence pair to the shared history."""
 
@@ -105,6 +137,11 @@ class TranslationHistoryDB:
         self._lock = threading.Lock()
         self._conn = None
         self._warned = False
+        # Set by retire() when the app switches databases. A translation already
+        # in flight may still hold a reference to this writer; without a permanent
+        # stop flag it would reopen the closed connection and append to the *old*
+        # database (i.e. pollute the production DB after Debug was enabled).
+        self._retired = False
 
     @property
     def path(self) -> str:
@@ -113,6 +150,8 @@ class TranslationHistoryDB:
     def _connect(self):
         if self._conn is not None:
             return self._conn
+        if self._retired:
+            raise RuntimeError("history writer has been retired")
 
         # The directory may not exist yet when the C# app has never been built in
         # this location; creating it keeps the first write from failing.
@@ -168,6 +207,8 @@ class TranslationHistoryDB:
             lag_ms = int(max(0.0, now - (speech_start + duration)) * 1000)
 
         with self._lock:
+            if self._retired:
+                return
             try:
                 self._connect().execute(
                     "INSERT INTO TranslationHistory "
@@ -190,6 +231,22 @@ class TranslationHistoryDB:
                 if not self._warned:
                     log.error(f"History DB write failed ({self._path}): {exc}")
                     self._warned = True
+
+    def retire(self) -> None:
+        """Close for good: used when a Debug toggle swaps the target database.
+
+        Unlike close(), a retired writer will never reconnect, so a translation
+        that was already routed to it cannot write to the previous file.
+        """
+        with self._lock:
+            self._retired = True
+            if self._conn is not None:
+                try:
+                    self._conn.commit()
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def close(self) -> None:
         with self._lock:

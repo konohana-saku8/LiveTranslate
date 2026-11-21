@@ -601,6 +601,7 @@ class DragHandle(QWidget):
     topmost_toggled = pyqtSignal(bool)
     auto_scroll_toggled = pyqtSignal(bool)
     taskbar_toggled = pyqtSignal(bool)
+    debug_toggled = pyqtSignal(bool)
     target_language_changed = pyqtSignal(str)
     source_language_changed = pyqtSignal(str)
     model_changed = pyqtSignal(int)
@@ -731,6 +732,16 @@ class DragHandle(QWidget):
         self._taskbar_check.toggled.connect(self.taskbar_toggled.emit)
         row2a.addWidget(self._taskbar_check)
 
+        # Debug: translations go to the debug DB only, never the shared archive.
+        # Amber while on so it is obvious a run is not being recorded for real.
+        self._debug_check = QCheckBox(t("debug"))
+        self._debug_check.setFont(QFont("Consolas", 8))
+        self._debug_check.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._debug_check.setStyleSheet(_CHECK_CSS)
+        self._debug_check.setToolTip(t("debug_hint"))
+        self._debug_check.toggled.connect(self._on_debug_toggled)
+        row2a.addWidget(self._debug_check)
+
         row2a.addStretch()
         row2_outer.addLayout(row2a)
 
@@ -844,6 +855,29 @@ class DragHandle(QWidget):
     def auto_scroll(self) -> bool:
         return self._auto_scroll.isChecked()
 
+    def _update_debug_style(self, enabled: bool):
+        # Amber label while debug history routing is active.
+        self._debug_check.setStyleSheet(
+            _CHECK_CSS.replace("color: #888", "color: #ffb454") if enabled else _CHECK_CSS
+        )
+
+    def _on_debug_toggled(self, enabled: bool):
+        self._update_debug_style(enabled)
+        self.debug_toggled.emit(enabled)
+
+    def set_debug_checked(self, checked: bool, emit: bool = True):
+        """Set the checkbox from an external toggle (tray / startup restore)."""
+        self._debug_check.blockSignals(True)
+        self._debug_check.setChecked(checked)
+        self._debug_check.blockSignals(False)
+        self._update_debug_style(checked)
+        if emit:
+            self.debug_toggled.emit(checked)
+
+    def set_debug_db_path(self, path: str):
+        hint = t("debug_hint")
+        self._debug_check.setToolTip(hint.format(path=path) if path else hint)
+
     def set_running(self, running: bool):
         self._running = running
         if running:
@@ -900,6 +934,7 @@ class SubtitleOverlay(QWidget):
     hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     subtitle_toggled = pyqtSignal()
+    debug_toggled = pyqtSignal(bool)
     mode_changed = pyqtSignal(str)  # "full" or "compact"
     position_changed = pyqtSignal()
 
@@ -965,6 +1000,7 @@ class SubtitleOverlay(QWidget):
         self._handle.click_through_toggled.connect(self._set_click_through)
         self._handle.topmost_toggled.connect(self._set_topmost)
         self._handle.taskbar_toggled.connect(self._set_taskbar)
+        self._handle.debug_toggled.connect(self.debug_toggled.emit)
         self._handle.target_language_changed.connect(self.target_language_changed.emit)
         self._handle.source_language_changed.connect(self.source_language_changed.emit)
         self._handle.model_changed.connect(self.model_switch_requested.emit)
@@ -1281,6 +1317,12 @@ class SubtitleOverlay(QWidget):
 
     def set_models(self, models: list, active_index: int = 0):
         self._handle.set_models(models, active_index)
+
+    def set_debug_checked(self, checked: bool, emit: bool = True):
+        self._handle.set_debug_checked(checked, emit)
+
+    def set_debug_db_path(self, path: str):
+        self._handle.set_debug_db_path(path)
 
     def clear(self):
         self.clear_signal.emit()

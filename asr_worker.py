@@ -78,6 +78,11 @@ def _load_engine(config: dict):
 
         worker_device = parsed_device if parsed_device == "cpu" else f"cuda:{device_index}"
         engine = AnimeWhisperEngine(device=worker_device, hub=hub)
+    elif engine_type == "qwen-asr":
+        from asr_qwen_asr import QwenASREngine
+
+        worker_device = parsed_device if parsed_device == "cpu" else f"cuda:{device_index}"
+        engine = QwenASREngine(device=worker_device, hub="hf")
     else:
         from asr_engine import ASREngine
 

@@ -18,6 +18,12 @@ from pathlib import Path
 
 log = logging.getLogger("LiveTranslate.HistoryDB")
 
+# Written into TranslatedText for a failed translation. The substring
+# "Translation Failed" is what live-archive::clean_translation() looks for to
+# blank out a row, so failed rows stay in the DB for manual correction without
+# leaking into published transcripts.
+FAILED_PLACEHOLDER = "[Translation Failed]"
+
 # Identical to the statement in the C# HistoryLogger, so whichever program opens
 # the file first produces the table the other one expects.
 SCHEMA = """
@@ -45,6 +51,10 @@ EXTRA_COLUMNS = (
     ("SpeechStart", "REAL"),
     ("Duration", "REAL"),
     ("LagMs", "INTEGER"),
+    # 'ok' | 'failed'. Failed rows keep the Japanese source so it can be
+    # corrected by hand later; the placeholder in TranslatedText is filtered
+    # out by live-archive's export, so it never reaches a published transcript.
+    ("Status", "TEXT"),
 )
 
 
@@ -184,22 +194,34 @@ class TranslationHistoryDB:
             log.info("History DB: added timing columns %s", ", ".join(added))
 
     def log(self, source: str, translated: str, target_language: str,
-            speech_start: float = None, duration: float = None) -> None:
+            speech_start: float = None, duration: float = None,
+            failed: bool = False) -> None:
         """Append one sentence pair. Never raises.
 
         `speech_start` is when the sentence was actually spoken, `duration` how
         long it took. Both are optional so every existing caller keeps working;
         when they are missing the row is marked by NULL and readers fall back to
         `Timestamp` (which lags by roughly a second).
+
+        A failed translation is recorded too (with the original source text and
+        a placeholder), so a dead translation API cannot lose the Japanese the
+        ASR produced. Set `failed=True` from the caller, or pass a bracketed
+        placeholder as `translated` -- both mark the row Status='failed'. The
+        placeholder contains "Translation Failed", which live-archive's export
+        filters out, so these rows never become published subtitles.
         """
         source = (source or "").strip()
         translated = (translated or "").strip()
-        if not source or not translated:
+        if not source:
             return
-        # A bracketed placeholder (`[error: ...]`, `[repetition]`) is the UI's way
-        # of showing a failure in the translation slot, not a translation.
+        # Bracketed placeholders are the UI's failure markers, not translations.
+        # Keep the row (the source is valuable) but flag it as failed.
         if translated.startswith("[") and translated.endswith("]"):
-            return
+            failed = True
+        if not translated:
+            failed = True
+        if failed:
+            translated = FAILED_PLACEHOLDER
 
         now = time.time()
         lag_ms = None
@@ -213,8 +235,8 @@ class TranslationHistoryDB:
                 self._connect().execute(
                     "INSERT INTO TranslationHistory "
                     "(Timestamp, SourceText, TranslatedText, TargetLanguage, ApiUsed, "
-                    " SpeechStart, Duration, LagMs) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " SpeechStart, Duration, LagMs, Status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         str(int(now)),
                         source,
@@ -224,6 +246,7 @@ class TranslationHistoryDB:
                         float(speech_start) if speech_start else None,
                         float(duration) if duration else None,
                         lag_ms,
+                        "failed" if failed else "ok",
                     ),
                 )
                 self._connect().commit()

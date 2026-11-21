@@ -1302,6 +1302,12 @@ class LiveTranslateApp:
                     self._total_completion_tokens * self._output_price) / 1_000_000
         return 0.0
 
+    def _log_failed_translation(self, msg_id, text, timing):
+        """Keep the ASR source even when the translation API failed."""
+        if self._history:
+            self._history.log(text, "", self._target_language,
+                              timing[0], timing[1], failed=True)
+
     def _translate_async(self, msg_id, text, source_lang, extra_langs=None):
         """Translate text and update UI with streaming display."""
         # 这句是几点开口的、说了多久，等会儿落库时一起写上
@@ -1320,14 +1326,15 @@ class LiveTranslateApp:
             self._total_completion_tokens += ct
             cost = self._compute_cost()
             log.info(f"Translate ({tl_ms:.0f}ms): {translated}")
-            if translated:
-                # txt output is disabled; the history database is the record now.
-                # self._transcript.write_translation(msg_id, translated)
-                if self._history:
-                    self._history.log(text, translated, self._target_language,
-                                      timing[0], timing[1])
-            # else:
-            #     self._transcript.finalize_no_translation(msg_id)
+            # Record the row whether or not the translation succeeded: a dead
+            # API must not lose the Japanese the ASR produced. Failed rows carry
+            # a placeholder + Status='failed' and are filtered out by the
+            # live-archive exporter, so they are safe to keep in the real DB.
+            if self._history:
+                self._history.log(text, translated or "", self._target_language,
+                                  timing[0], timing[1], failed=not bool(translated))
+            # txt output is disabled; the history database is the record now.
+            # self._transcript.write_translation(msg_id, translated)
             if self._overlay:
                 self._overlay.update_translation(msg_id, translated, tl_ms)
                 self._overlay.update_stats(
@@ -1344,6 +1351,7 @@ class LiveTranslateApp:
                 self._subwin.update_text(text, tl_dict)
         except RepetitionError:
             log.warning("Repetition loop detected, model may not support structured output well")
+            self._log_failed_translation(msg_id, text, timing)
             # self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(
@@ -1357,6 +1365,7 @@ class LiveTranslateApp:
                 log.warning(f"Translate error: {e}")
             else:
                 log.error(f"Translate error: {e}", exc_info=True)
+            self._log_failed_translation(msg_id, text, timing)
             # self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(msg_id, f"[error: {e}]", 0)

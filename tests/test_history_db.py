@@ -1,6 +1,11 @@
 import sqlite3
 
-from history_db import TranslationHistoryDB, debug_db_path, to_history_language
+from history_db import (
+    FAILED_PLACEHOLDER,
+    TranslationHistoryDB,
+    debug_db_path,
+    to_history_language,
+)
 
 
 def test_short_codes_become_the_tags_the_csharp_history_uses():
@@ -64,22 +69,32 @@ def test_retired_writer_cannot_write_to_the_old_database(tmp_path):
     assert rows(debug) == [("テスト",)]
 
 
-def test_error_placeholder_is_not_history(tmp_path):
+def test_failed_translation_is_recorded_with_source_and_filterable_status(tmp_path):
+    """A dead translation API must not lose the ASR text.
+
+    Failed rows keep the Japanese source, carry a placeholder live-archive
+    filters out, and are marked so they can be selected for manual correction.
+    """
     db = TranslationHistoryDB(str(tmp_path / "history.db"), api_name="LiveTranslate:test")
 
-    db.log("こんにちは", "[error: timeout]", "zh")
-    db.log("", "你好", "zh")
+    db.log("こんにちは", "[error: timeout]", "zh")          # UI error marker -> failed
+    db.log("さようなら", "", "zh", failed=True)              # explicit failure
+    db.log("おはよう", "早上好", "zh")                        # success
+    db.log("", "你好", "zh")                                  # no source -> skipped
     db.close()
 
-    conn = sqlite3.connect(str(tmp_path / "history.db"))
-    # The table is created lazily on the first real write, so a run that only
-    # produced placeholders may leave no table at all.
-    table = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='TranslationHistory'"
-    ).fetchone()
-    count = (
-        conn.execute("SELECT COUNT(*) FROM TranslationHistory").fetchone()[0]
-        if table
-        else 0
-    )
-    assert count == 0
+    rows = sqlite3.connect(str(tmp_path / "history.db")).execute(
+        "SELECT SourceText, TranslatedText, Status FROM TranslationHistory ORDER BY Id"
+    ).fetchall()
+    assert rows == [
+        ("こんにちは", FAILED_PLACEHOLDER, "failed"),
+        ("さようなら", FAILED_PLACEHOLDER, "failed"),
+        ("おはよう", "早上好", "ok"),
+    ]
+    # live-archive::clean_translation() blanks any row containing this text.
+    assert "Translation Failed" in FAILED_PLACEHOLDER
+
+    failed = sqlite3.connect(str(tmp_path / "history.db")).execute(
+        "SELECT SourceText FROM TranslationHistory WHERE Status='failed'"
+    ).fetchall()
+    assert failed == [("こんにちは",), ("さようなら",)]

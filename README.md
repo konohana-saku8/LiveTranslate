@@ -1,152 +1,46 @@
-# LiveTranslate
+# LiveTranslate（个人维护分支）
 
-**English** | [中文](README_zh.md)
+Windows 实时音频翻译：捕获系统声音（可选混入麦克风），VAD 切句后在本地跑 ASR，
+再交给任意 OpenAI 兼容接口流式翻译，结果显示在透明置顶悬浮窗。
 
-Real-time audio translation for Windows. Captures system audio (WASAPI loopback) and optional microphone input, runs ASR, translates via LLM API, and displays results in a transparent overlay.
+本仓库是 [TheDeathDragon/LiveTranslate](https://github.com/TheDeathDragon/LiveTranslate)
+的个人维护分支。安装方式、模型说明、翻译 API 配置、主题等完整文档以原仓库为准：
+<https://github.com/TheDeathDragon/LiveTranslate#readme>
 
-Works with any system audio — videos, livestreams, voice chat. No player modifications needed.
+## 这个分支新增的功能
 
-![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Windows](https://img.shields.io/badge/Platform-Windows-0078d4)
-![License](https://img.shields.io/badge/License-MIT-green)
+| 功能 | 说明 |
+| --- | --- |
+| 手机远程听译 | 电脑端提供 WebSocket 服务，手机把其他应用的声音推过来，复用电脑的 ASR 与翻译，结果同时回到手机悬浮窗。客户端见 [LiveTranslateClient](https://github.com/hibane-hinome/LiveTranslateClient) |
+| 逐句落库 | 每句的原文、译文、目标语言，以及开口时刻、时长、链路延迟写进 SQLite，供事后整理成中日对照逐字稿（[live-archive](https://github.com/hibane-hinome/live-archive)） |
+| ReazonSpeech | 新增日语离线 ASR 引擎 |
+| Qwen3-ASR 1.7B | 新增多语言 ASR 选项 |
+| 调试库隔离 | 面板勾选 Debug 后写入独立调试数据库，不动正式历史 |
+| 失败也入库 | 翻译失败时保留 ASR 原文与失败标记，便于事后校准 |
+| 手机连接状态 | 悬浮窗标题栏显示远程服务状态：未启动 / 等待连接 / 手机已连接 |
 
-## Screenshot
+## 快速开始
 
-![LiveTranslate](screenshot/en.png)
+1. 双击 `install.bat`：检测 Python、创建虚拟环境、按显卡安装 CUDA 或 CPU 版 PyTorch。
+2. 双击 `start.bat` 启动。
+3. 首次向导选择模型下载源（ModelScope / HuggingFace）与缓存目录，等待 VAD 与 ASR 模型就绪。
+4. 在控制面板「翻译」页填写 API Base、API Key 与模型。
+5. 点「运行」，悬浮窗开始显示原文与译文。
 
-## Video
+手机端：
 
-[![Install & Demo](https://img.shields.io/badge/Bilibili-Install%20%26%20Demo-00A1D6?logo=bilibili)](https://www.bilibili.com/video/BV1K2Awz6Euw)
+1. 安装 [LiveTranslateClient](https://github.com/hibane-hinome/LiveTranslateClient)。
+2. 在电脑悬浮窗标题栏点「启动服务」，记下端口（默认 `8766`）。
+3. 手机设置页填电脑的局域网 IP、端口，令牌可留空；点「连接」，再点「开始」选择要采集声音的应用。
 
-## Features
+同一时间只接受一台手机；电脑与手机需在同一局域网。
 
-- **Real-time pipeline**: System audio → VAD → ASR → LLM translation → overlay
-- **Multiple ASR engines**: faster-whisper, SenseVoice, FunASR Nano, Anime-Whisper
-- **Remote ASR**: offload speech recognition to a GPU machine over HTTP — see [REMOTE_ASR.md](REMOTE_ASR.md)
-- **Any OpenAI-compatible API**: DeepSeek, Grok, Qwen, GPT, Ollama, vLLM, etc.
-- **Streaming translation display**: Real-time character-by-character translation output
-- **Per-model settings**: Streaming, structured output (JSON), context history, disable thinking
-- **Microphone mix-in**: Optionally mix microphone input with system audio for ASR
-- **Low-latency VAD**: 32ms chunks + Silero VAD with adaptive silence detection
-- **Transparent overlay**: Always-on-top, click-through, draggable, 14 color themes
-- **CUDA acceleration**: GPU-accelerated ASR inference
-- **Auto model management**: Setup wizard, ModelScope / HuggingFace dual sources
-- **Built-in benchmark**: Compare translation model speed and quality
+## 上游功能
 
-## Changelog
+系统音频捕获、麦克风混音、多 ASR 引擎、远程 Whisper（见 [REMOTE_ASR.md](REMOTE_ASR.md)）、
+流式翻译、模型独立配置、内置基准测试、14 种悬浮窗主题等均来自上游。
+完整文档、预编译包与更新日志请访问原仓库。
 
-See [English Changelog](i18n/CHANGELOG_en.md) | [中文更新日志](i18n/CHANGELOG_zh.md)
+## 许可
 
-## Requirements
-
-- **OS**: Windows 10/11
-- **Python**: 3.10–3.12 (or use the portable build)
-- **GPU** (recommended): NVIDIA + CUDA 12.6 (Blackwell GPUs like RTX 50xx require CUDA 12.8)
-- **Network**: Access to a translation API
-
-## Quick Start
-
-### Portable build (no Python required, recommended for non-developers)
-
-Download `LiveTranslate-portable-*.zip` from [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases), unzip, and double-click **`start.bat`**. The first run auto-downloads a portable Python 3.12 and installs GPU-aware dependencies — no Python installation needed.
-
-### From source
-
-```bash
-git clone https://github.com/TheDeathDragon/LiveTranslate.git
-cd LiveTranslate
-```
-
-Double-click **`install.bat`** — the installer will:
-1. Detect Python 3.10–3.12 (auto-install via winget if missing)
-2. Create a virtual environment
-3. Auto-detect NVIDIA GPU and let you choose CUDA / CPU PyTorch
-4. Install all dependencies
-
-Then double-click **`start.bat`** to launch.
-
-To update, double-click **`update.bat`** — it will pull the latest code and update dependencies (auto-installs Git via winget if missing).
-
-<details>
-<summary>Manual install</summary>
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-
-# PyTorch (choose one)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126  # CUDA
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128  # CUDA (RTX 50xx)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu    # CPU only
-
-# Dependencies
-pip install -r requirements.txt
-
-# Launch
-.venv\Scripts\python.exe main.py
-```
-
-</details>
-
-## First Launch
-
-1. Setup wizard appears — choose download source (ModelScope / HuggingFace) and cache path
-2. Silero VAD + SenseVoice models download automatically (~1GB)
-3. Main UI appears when ready
-
-## Translation API
-
-Settings → Translation tab:
-
-| Parameter | Example |
-|-----------|---------|
-| API Base | `https://api.deepseek.com/v1` |
-| API Key | Your key |
-| Model | `deepseek-chat` |
-| Proxy | `none` / `system` / custom URL |
-
-## Architecture
-
-```
-Audio (WASAPI 32ms) → VAD (Silero) → ASR → LLM Translation → Overlay
-         ↑ optional mic mix-in
-```
-
-```
-main.py                 Entry point & pipeline
-├── audio_capture.py    WASAPI loopback + mic mix-in
-├── vad_processor.py    Silero VAD
-├── asr_engine.py       faster-whisper backend
-├── asr_funasr.py       Unified FunASR model selector backend
-├── asr_sensevoice.py   SenseVoice backend
-├── asr_funasr_nano.py  FunASR Nano backend
-├── asr_anime_whisper.py Anime-Whisper backend (ja anime/galgame)
-├── asr_remote.py        Remote Whisper client (→ asr_server.py, see REMOTE_ASR.md)
-├── translator.py       OpenAI-compatible client (streaming, JSON schema, context)
-├── model_manager.py    Model download & cache
-├── subtitle_overlay.py PyQt6 overlay
-├── control_panel.py    Settings UI (7 tabs)
-├── dialogs.py          Wizard, download & model config dialogs
-└── benchmark.py        Translation benchmark
-```
-
-## Acknowledgements
-
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Whisper inference via CTranslate2
-- [FunASR](https://github.com/modelscope/FunASR) — SenseVoice / Fun-ASR-Nano
-- [Anime-Whisper](https://huggingface.co/litagin/anime-whisper) — Japanese anime/galgame ASR
-- [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=TheDeathDragon%2FLiveTranslate&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=TheDeathDragon/LiveTranslate&type=date&theme=dark&legend=top-left&sealed_token=0t-kzcN9leqL-yaHdKcBdHLdLlE6NNHa48RpsLvUM3u2fOiZOYqWfjgplXxAtjk1ZJciSAbzI3gZ4PQqqHrOv4abM1CpOomUymVX6J1zPN-3Ygu0-Xr8Kpj3Xt8jWS05B4tTpuNSmoYqyHipPvKC7lxGfLcOF_zctjqvOka-j9gYWct0oQyJnGjdcZxY" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=TheDeathDragon/LiveTranslate&type=date&legend=top-left&sealed_token=0t-kzcN9leqL-yaHdKcBdHLdLlE6NNHa48RpsLvUM3u2fOiZOYqWfjgplXxAtjk1ZJciSAbzI3gZ4PQqqHrOv4abM1CpOomUymVX6J1zPN-3Ygu0-Xr8Kpj3Xt8jWS05B4tTpuNSmoYqyHipPvKC7lxGfLcOF_zctjqvOka-j9gYWct0oQyJnGjdcZxY" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=TheDeathDragon/LiveTranslate&type=date&legend=top-left&sealed_token=0t-kzcN9leqL-yaHdKcBdHLdLlE6NNHa48RpsLvUM3u2fOiZOYqWfjgplXxAtjk1ZJciSAbzI3gZ4PQqqHrOv4abM1CpOomUymVX6J1zPN-3Ygu0-Xr8Kpj3Xt8jWS05B4tTpuNSmoYqyHipPvKC7lxGfLcOF_zctjqvOka-j9gYWct0oQyJnGjdcZxY" />
- </picture>
-</a>
-
-## License
-
-[MIT License](LICENSE)
+[MIT License](LICENSE)，与原项目一致。

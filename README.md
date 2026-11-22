@@ -11,8 +11,8 @@ Windows 实时音频翻译：捕获系统声音（可选混入麦克风），VAD
 
 | 功能 | 说明 |
 | --- | --- |
-| 手机远程听译 | 电脑端提供 WebSocket 服务，手机把其他应用的声音推过来，复用电脑的 ASR 与翻译，结果同时回到手机悬浮窗。客户端见 [LiveTranslateClient](https://github.com/hibane-hinome/LiveTranslateClient) |
-| 逐句落库 | 每句的原文、译文、目标语言，以及开口时刻、时长、链路延迟写进 SQLite，供事后整理成中日对照逐字稿（[live-archive](https://github.com/hibane-hinome/live-archive)） |
+| 手机远程听译 | 电脑端提供 WebSocket 服务，手机把其他应用的声音推过来，复用电脑的 ASR 与翻译，结果同时回到手机悬浮窗。客户端见 [LiveTranslateClient](https://github.com/konohana-saku8/LiveTranslateClient) |
+| 逐句落库 | 每句的原文、译文、目标语言，以及开口时刻、时长、链路延迟写进 SQLite，供事后整理成中日对照逐字稿（[live-archive](https://github.com/konohana-saku8/live-archive)） |
 | ReazonSpeech | 新增日语离线 ASR 引擎 |
 | Qwen3-ASR 1.7B | 新增多语言 ASR 选项 |
 | 调试库隔离 | 面板勾选 Debug 后写入独立调试数据库，不动正式历史 |
@@ -29,7 +29,7 @@ Windows 实时音频翻译：捕获系统声音（可选混入麦克风），VAD
 
 手机端：
 
-1. 安装 [LiveTranslateClient](https://github.com/hibane-hinome/LiveTranslateClient)。
+1. 安装 [LiveTranslateClient](https://github.com/konohana-saku8/LiveTranslateClient)。
 2. 在电脑悬浮窗标题栏点「启动服务」，记下端口（默认 `8766`）。
 3. 手机设置页填电脑的局域网 IP、端口，令牌可留空；点「连接」，再点「开始」选择要采集声音的应用。
 

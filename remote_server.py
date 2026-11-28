@@ -20,6 +20,7 @@ with code 4409 instead of kicking the active one.
 
 import json
 import logging
+import socket
 import threading
 import time
 from datetime import datetime
@@ -37,6 +38,13 @@ SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512  # 32 ms, Silero VAD's native window
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8766
+
+# UDP handshake used by the Android client to find this PC without the user
+# typing an address. The TCP port is configurable, so the discovery port is
+# fixed; UDP and TCP can share the same number.
+DISCOVERY_PORT = 8766
+DISCOVERY_MAGIC = b"LIVETRANSLATE_DISCOVER_V1"
+DISCOVERY_PROTOCOL = 1
 
 CLOSE_UNAUTHORIZED = 4401
 CLOSE_BUSY = 4409
@@ -78,6 +86,8 @@ class RemoteServer:
         self._lock = threading.Lock()
         self._server = None
         self._thread = None
+        self._discovery = None
+        self._discovery_thread = None
         self._running = False
         self._clients = 0
         self._vad = None
@@ -122,6 +132,7 @@ class RemoteServer:
         )
         self._thread.start()
         log.info(f"Remote server listening on {self.host}:{self.port}")
+        self._start_discovery()
         self._report_status()
 
     def _serve(self):
@@ -132,13 +143,80 @@ class RemoteServer:
                 log.error("Remote server loop failed", exc_info=True)
         finally:
             self._running = False
+            self._stop_discovery()
             log.info("Remote server stopped")
             self._report_status()
+
+    # ── LAN discovery ──
+
+    def _start_discovery(self):
+        """Answer UDP probes so the phone can find us without knowing the port.
+
+        The reply contains the TCP port and whether a token is required, never
+        the token itself. Failure to bind (port taken, firewall) is not fatal:
+        the client also knows how to scan the subnet.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", DISCOVERY_PORT))
+            sock.settimeout(0.5)
+        except OSError:
+            sock.close()
+            log.warning(
+                f"UDP discovery port {DISCOVERY_PORT} unavailable; "
+                "automatic discovery disabled",
+                exc_info=True,
+            )
+            return
+        self._discovery = sock
+        self._discovery_thread = threading.Thread(
+            target=self._discovery_loop, name="RemoteDiscovery", daemon=True
+        )
+        self._discovery_thread.start()
+
+    def _discovery_loop(self):
+        sock = self._discovery
+        if sock is None:
+            return
+        while self._running:
+            try:
+                data, addr = sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if data.strip() != DISCOVERY_MAGIC:
+                continue
+            reply = json.dumps({
+                "app": "livetranslate",
+                "protocol": DISCOVERY_PROTOCOL,
+                "port": self.port,
+                "token_required": bool(self.token),
+                "name": socket.gethostname(),
+            }).encode("utf-8")
+            try:
+                sock.sendto(reply, addr)
+            except OSError:
+                log.debug("Discovery reply failed", exc_info=True)
+
+    def _stop_discovery(self):
+        sock = self._discovery
+        self._discovery = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if self._discovery_thread is not None:
+            self._discovery_thread.join(timeout=1)
+            self._discovery_thread = None
 
     def stop(self):
         if not self._running:
             return
         self._running = False
+        self._stop_discovery()
         server = self._server
         self._server = None
         if server is not None:
